@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from importlib.metadata import version
-from typing import Any, List
+from typing import Any, List, Optional
 
 import pymongo
 from langchain.retrievers.parent_document_retriever import ParentDocumentRetriever
 from langchain_core.callbacks import (
+    AsyncCallbackManagerForRetrieverRun,
     CallbackManagerForRetrieverRun,
 )
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_core.runnables import run_in_executor
 from langchain_text_splitters import TextSplitter
 from pymongo import MongoClient
 from pymongo.driver_info import DriverInfo
@@ -23,11 +25,24 @@ from langchain_mongodb.utils import make_serializable
 class MongoDBAtlasParentDocumentRetriever(ParentDocumentRetriever):
     """MongoDB Atlas's ParentDocumentRetriever
 
-    Uses ONE Collection for both Vector and Doc store.
+    “Parent Document Retrieval” is a common approach to enhance the performance of
+    retrieval methods in RAG by providing the LLM with a broader context to consider.
+    In essence, we divide the original documents into relatively small chunks,
+    embed each one, and store them in a vector database.
+    Using such small chunks (a sentence or a couple of sentences)
+    helps the embedding models to better reflect their meaning.
 
-    For details, see parent classes
+    In this implementation, we can store both parent and child documents in a single
+    collection while only having to compute and index embedding vectors for the chunks!
+
+    This is achieved by backing both the
+    vectorstore, :class:`~langchain_mongodb.vectorstores.MongoDBAtlasVectorSearch`
+    and the docstore  :class:`~langchain_mongodb.docstores.MongoDBDocStore`
+    by the same MongoDB Collection.
+
+    For more details, see superclasses
         :class:`~langchain.retrievers.parent_document_retriever.ParentDocumentRetriever`
-        and :class:`~langchain.retrievers.MultiVectorRetriever` for further details.
+        and :class:`~langchain.retrievers.MultiVectorRetriever`.
 
     Examples:
         >>> from langchain_mongodb.retrievers.parent_document import (
@@ -59,7 +74,10 @@ class MongoDBAtlasParentDocumentRetriever(ParentDocumentRetriever):
     """Key stored in metadata pointing to parent document"""
 
     def _get_relevant_documents(
-        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+        self,
+        query: str,
+        *,
+        run_manager: Optional[CallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
         query_vector = self.vectorstore._embedding.embed_query(query)
 
@@ -102,6 +120,21 @@ class MongoDBAtlasParentDocumentRetriever(ParentDocumentRetriever):
             make_serializable(res)
             docs.append(Document(page_content=text, metadata=res))
         return docs
+
+    async def _aget_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: AsyncCallbackManagerForRetrieverRun,
+    ) -> List[Document]:
+        """Asynchronous version of get_relevant_documents"""
+
+        return await run_in_executor(
+            None,
+            self._get_relevant_documents,
+            query,
+            run_manager=run_manager.get_sync(),
+        )
 
     @classmethod
     def from_connection_string(
