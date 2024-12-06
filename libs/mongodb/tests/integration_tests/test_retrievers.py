@@ -1,5 +1,6 @@
 import os
 from typing import Generator, List
+from time import sleep, time
 
 import pytest
 from langchain_core.documents import Document
@@ -10,7 +11,7 @@ from pymongo.collection import Collection
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_mongodb.index import (
     create_fulltext_search_index,
-    create_vector_search_index,
+    create_vector_search_index
 )
 from langchain_mongodb.retrievers import (
     MongoDBAtlasFullTextSearchRetriever,
@@ -159,6 +160,18 @@ def test_fulltext_retriever(
         search_index_name=SEARCH_INDEX_NAME,
         search_field=PAGE_CONTENT_FIELD,
     )
+
+    # Wait for the search index to complete.
+    search_content = dict(index=SEARCH_INDEX_NAME, wildcard=dict(query="*", path=PAGE_CONTENT_FIELD, allowAnalyzedField=True))
+    n_docs = collection.count_documents({})
+    t0 = time()
+    while True:
+        if (time() - t0) > TIMEOUT:
+            raise TimeoutError(f'Search index {SEARCH_INDEX_NAME} did not complete in {TIMEOUT}')
+        results = collection.aggregate([{ "$search": search_content }])
+        if len(list(results)) == n_docs:
+            break
+        sleep(INTERVAL)
 
     query = "When was the last time I visited new orleans?"
     results = retriever.invoke(query)
