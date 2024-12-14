@@ -45,17 +45,15 @@ def example_documents() -> List[Document]:
 
 @pytest.fixture(scope="module")
 def embedding_openai() -> Embeddings:
+    if not os.environ.get("OPENAI_API_KEY"):
+        pytest.skip("test_retrievers expects OPENAI_API_KEY in os.environ")
+
     from langchain_openai import OpenAIEmbeddings
 
-    try:
-        from langchain_openai import OpenAIEmbeddings
-
-        return OpenAIEmbeddings(
-            openai_api_key=os.environ["OPENAI_API_KEY"],  # type: ignore # noqa
-            model="text-embedding-3-small",
-        )
-    except Exception:
-        pytest.skip("test_retrievers expects OPENAI_API_KEY in os.environ")
+    return OpenAIEmbeddings(
+        openai_api_key=os.environ["OPENAI_API_KEY"],  # type: ignore # noqa
+        model="text-embedding-3-small",
+    )
 
 
 @pytest.fixture(scope="module")
