@@ -87,7 +87,7 @@ def maximal_marginal_relevance(
     Notes:
         The Maximal Marginal Relevance (MMR) is computed using the following formula:
 
-    MMR = argmax_{D_i ∈ R \ S} [λ * Sim(D_i, Q) - (1 - λ) * max_{D_j ∈ S} Sim(D_i, D_j)]
+    MMR = argmax_{D_i ∈ R \\ S} [λ * Sim(D_i, Q) - (1 - λ) * max_{D_j ∈ S} Sim(D_i, D_j)]
 
         where:
         - R is the set of candidate documents,
