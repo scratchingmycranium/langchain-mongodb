@@ -15,7 +15,6 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
 
-# If you have any indexing or pipeline code:
 from langchain_mongodb.pipelines import vector_search_stage
 from langchain_mongodb.utils import (
     make_serializable,

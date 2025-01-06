@@ -58,9 +58,6 @@ class MongoDBAtlasVectorSearch(MongoDBAtlasVectorSearchBase):
   ) -> Iterable[Dict[str, Any]]:
       return self._collection.aggregate(pipeline)
 
-  # If embeddings are sync, no changes needed; inherited from base.
-  # If you need synchronous code, do it here.
-
   # ------------------------------------------------------
   # Public synchronous methods
   # ------------------------------------------------------

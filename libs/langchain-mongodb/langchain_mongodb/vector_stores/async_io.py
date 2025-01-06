@@ -35,9 +35,6 @@ class AsyncMongoDBAtlasVectorSearch(MongoDBAtlasVectorSearchBase):
         )
         self._collection = collection
 
-    # ------------------------------------------------------
-    # Implement the required _io_* methods for async usage
-    # ------------------------------------------------------
     async def _io_insert_many_async(self, docs: List[Dict[str, Any]]) -> List[str]:
         """
         Perform an async insert-many and return string IDs.
@@ -57,9 +54,6 @@ class AsyncMongoDBAtlasVectorSearch(MongoDBAtlasVectorSearchBase):
         cursor = await self._collection.aggregate(pipeline)
         return cursor  # an async cursor
 
-    # The base class calls _io_* methods, but we have them named with `_async` here,
-    # so we'll adapt them:
-
     def _io_insert_many(self, docs: List[Dict[str, Any]]) -> List[str]:
         raise TypeError("Sync insert called on Async class. Use async method instead.")
 
@@ -68,10 +62,6 @@ class AsyncMongoDBAtlasVectorSearch(MongoDBAtlasVectorSearchBase):
 
     def _io_aggregate(self, pipeline: List[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
         raise TypeError("Sync aggregate called on Async class. Use async method instead.")
-
-    # If your embedding is truly async:
-    # override _io_embed_documents / _io_embed_query with async calls.
-    # For now, let's assume they're sync calls on the embedding model.
 
     # ------------------------------------------------------
     # Public asynchronous methods
@@ -114,7 +104,7 @@ class AsyncMongoDBAtlasVectorSearch(MongoDBAtlasVectorSearchBase):
     ) -> List[str]:
         if not texts:
             return []
-        embeddings = self._io_embed_documents(texts)  # or await if truly async
+        embeddings = self._io_embed_documents(texts)
         if ids:
             to_insert = [
                 {
@@ -183,7 +173,7 @@ class AsyncMongoDBAtlasVectorSearch(MongoDBAtlasVectorSearchBase):
         Provide a sync stub that raises TypeError, redirecting to the async version.
         """
         raise TypeError(
-            "Use `await AsyncMongoDBAtlasVectorSearch.similarity_search(...)` instead."
+            "Use `await AsyncMongoDBAtlasVectorSearch.asimilarity_search(...)` instead."
         )
         
     async def asimilarity_search(
@@ -254,7 +244,7 @@ class AsyncMongoDBAtlasVectorSearch(MongoDBAtlasVectorSearchBase):
         cls,
         texts: List[str],
         embedding: Embeddings,
-        collection: Any,  # e.g. AsyncIOMotorCollection
+        collection: Any,
         metadatas: Optional[List[Dict]] = None,
         ids: Optional[List[str]] = None,
         **kwargs: Any,
