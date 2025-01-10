@@ -41,7 +41,12 @@ as either an `OPENAI_API_KEY` or a configured local version of [ollama](https://
 We have a convenience script to start a local Atlas instance, which requires `podman`:
 
 ```bash
-scripts/start_local_atlas.sh
+# First initialize and start the Podman machine (only needed once)
+podman machine init
+podman machine start
+
+# Now you can run the Atlas script
+./scripts/start_local_atlas.sh
 ```
 
 This will create a `.local_atlas_uri` file that has the `MONGODB_URI` set.  The `justfiles` are configured

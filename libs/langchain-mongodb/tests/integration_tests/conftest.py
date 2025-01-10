@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import List, Generator
 
 import pytest
 from langchain_community.document_loaders import PyPDFLoader
@@ -8,7 +8,9 @@ from langchain_core.embeddings import Embeddings
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain_openai import OpenAIEmbeddings
 from pymongo import MongoClient
+from pymongo.driver_info import DriverInfo
 
+MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
 
 @pytest.fixture(scope="session")
 def technical_report_pages() -> List[Document]:
@@ -20,12 +22,18 @@ def technical_report_pages() -> List[Document]:
 
 @pytest.fixture(scope="session")
 def connection_string() -> str:
-    return os.environ["MONGODB_URI"]
+    return MONGODB_URI
 
 
 @pytest.fixture(scope="session")
-def client(connection_string: str) -> MongoClient:
-    return MongoClient(connection_string)
+def client() -> Generator[MongoClient, None, None]:
+    """Sync client fixture."""
+    client = MongoClient(
+        MONGODB_URI,
+        driver=DriverInfo(name="Langchain Tests", version="test-version")
+    )
+    yield client
+    client.close()
 
 
 @pytest.fixture(scope="session")
