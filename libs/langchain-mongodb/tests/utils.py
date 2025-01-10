@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from time import monotonic, sleep
-from typing import Any, Dict, Generator, Iterable, List, Mapping, Optional, Union, cast
-
+import math
+from typing import Any, Dict, Generator, Iterable, List, Mapping, Optional, Union, cast, AsyncIterator
 from bson import ObjectId
 from langchain_core.callbacks.manager import (
     AsyncCallbackManagerForLLMRun,
@@ -23,6 +23,8 @@ from pymongo.results import DeleteResult, InsertManyResult
 
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_mongodb.cache import MongoDBAtlasSemanticCache
+
+import asyncio
 
 TIMEOUT = 120
 INTERVAL = 0.5
@@ -258,3 +260,171 @@ class MockCollection(Collection):
 
     def __repr__(self) -> str:
         return "MockCollection"
+
+class MockAsyncCursor:
+    def __init__(self, data: List[Dict[str, Any]]):
+        self._data = data
+        self._index = 0  # To track the cursor index
+
+    def __aiter__(self) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Enable async iteration.
+        """
+        return self
+
+    async def __anext__(self) -> Dict[str, Any]:
+        """
+        Provide the next document in the dataset asynchronously.
+        """
+        await asyncio.sleep(0)  # Simulate async behavior
+        if self._index < len(self._data):
+            item = self._data[self._index]
+            self._index += 1
+            return item
+        raise StopAsyncIteration
+
+    async def to_list(self, length: int = None) -> List[Dict[str, Any]]:
+        """
+        Return all documents as a list, optionally limiting the length.
+        """
+        await asyncio.sleep(0)  # Simulate async behavior
+        return self._data[:length] if length else self._data
+
+
+def _doc_matches_filter(doc: Dict[str, Any], flt: Dict[str, Any]) -> bool:
+    """
+    A basic filter matcher. Real MongoDB supports operators like $gt, $regex, etc.
+    You can expand this as needed if your test uses more-complex queries.
+    """
+    for k, v in flt.items():
+        # Very naive approach:
+        if k not in doc:
+            return False
+        
+        # If the test code uses an operator, e.g. {"text": {"$regex": ...}}, 
+        # you'll need to handle it separately here:
+        if isinstance(v, dict):
+            # Example for a naive $regex check:
+            if "$regex" in v:
+                import re
+                pattern = re.compile(v["$regex"], flags=0)
+                if not pattern.search(doc[k]):
+                    return False
+            else:
+                # Other operators could be handled similarly
+                return False
+        else:
+            # Basic equality check
+            if doc[k] != v:
+                return False
+    return True
+
+def cosine_similarity(vec1, vec2):
+    # Basic safe-guard for zero-length
+    dot = sum(a*b for a, b in zip(vec1, vec2))
+    norm1 = math.sqrt(sum(a*a for a in vec1) or 1e-9)
+    norm2 = math.sqrt(sum(b*b for b in vec2) or 1e-9)
+    return dot / (norm1 * norm2)
+
+class AsyncMockCollection:
+    """Async Mocked Mongo Collection."""
+
+    def __init__(self) -> None:
+        self._data: List[Dict[str, Any]] = []
+        # If you need an aggregated result separate from _data, you can store it here:
+        self._aggregate_result: List[Dict[str, Any]] = []
+        self._simulate_cache_aggregation_query = False
+
+    async def delete_many(self, flt: Dict[str, Any] = None, *args, **kwargs) -> DeleteResult:
+        if flt is None:
+            flt = {}
+        old_len = len(self._data)
+
+        # If it's a simple {"_id": {"$in": [...]}} filter, handle that explicitly:
+        in_ids = set()
+        # Check if we have {"_id": {"$in": [...]}}, else do a more general fallback
+        if "_id" in flt and isinstance(flt["_id"], dict) and "$in" in flt["_id"]:
+            in_ids = set(flt["_id"]["$in"])
+
+        new_data = []
+        removed = 0
+
+        for doc in self._data:
+            # If we do have a set of IDs to remove, check membership:
+            if in_ids:
+                if doc["_id"] in in_ids:
+                    removed += 1
+                else:
+                    new_data.append(doc)
+            else:
+                # Fallback to generic matching if not an $in query
+                if not _doc_matches_filter(doc, flt):
+                    new_data.append(doc)
+                else:
+                    removed += 1
+
+        self._data = new_data
+        return DeleteResult({"n": removed}, acknowledged=True)
+
+    async def insert_many(
+        self, to_insert: List[Any], *args, **kwargs
+    ) -> InsertManyResult:
+        mongodb_inserts = [
+            {"_id": ObjectId(), "score": 1, **doc} for doc in to_insert
+        ]
+        self._data.extend(mongodb_inserts)
+        return InsertManyResult(
+            inserted_ids=[doc["_id"] for doc in mongodb_inserts],
+            acknowledged=True,
+        )
+
+    async def insert_one(self, doc: Dict[str, Any], *args, **kwargs) -> InsertManyResult:
+        return await self.insert_many([doc])
+
+    async def count_documents(self, flt: Dict[str, Any] = None, **kwargs) -> int:
+        if flt is None:
+            flt = {}
+        return sum(_doc_matches_filter(doc, flt) for doc in self._data)
+
+    def find(self, flt: Dict[str, Any] = None) -> MockAsyncCursor:
+        """
+        Simulate Motor's find method, returning an async cursor.
+        """
+        if flt is None:
+            flt = {}
+        matched_docs = [d for d in self._data if _doc_matches_filter(d, flt)]
+        return MockAsyncCursor(matched_docs)
+
+    async def find_one(self, flt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for doc in self._data:
+            if _doc_matches_filter(doc, flt):
+                return doc
+        return None
+
+    async def update_one(
+        self,
+        find_query: Dict[str, Any],
+        update_spec: Dict[str, Any],
+        *args: Any,
+        upsert=True,
+        **kwargs: Any,
+    ):
+        """
+        Patch the first matching doc or insert if upsert=True and no match.
+        """
+        doc = await self.find_one(find_query)
+        set_options = update_spec.get("$set", {})
+
+        if doc:
+            doc.update(set_options)
+        elif upsert:
+            new_doc = {**find_query, **set_options}
+            await self.insert_one(new_doc)
+
+    async def aggregate(self, pipeline: List[Dict[str, Any]], *args, **kwargs) -> MockAsyncCursor:
+        if self._simulate_cache_aggregation_query:
+            return MockAsyncCursor(deepcopy(self._execute_cache_aggregation_query(*args, **kwargs)))
+        return MockAsyncCursor(deepcopy(self._aggregate_result))
+
+    def __repr__(self) -> str:
+        return "AsyncMockCollection"

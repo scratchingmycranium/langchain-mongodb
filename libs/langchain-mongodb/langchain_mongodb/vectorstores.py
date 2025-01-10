@@ -205,7 +205,7 @@ class MongoDBAtlasVectorSearch(VectorStore):
 
     def __init__(
         self,
-        collection: Collection[Dict[str, Any]],
+        collection: Union[Collection, Any],
         embedding: Embeddings,
         index_name: str = "vector_index",
         text_key: str = "text",
@@ -215,10 +215,10 @@ class MongoDBAtlasVectorSearch(VectorStore):
     ):
         """
         Args:
-            collection: MongoDB collection to add the texts to
+            collection: MongoDB collection to add the texts to. Can be a sync or async collection.
             embedding: Text embedding model to use
             text_key: MongoDB field that will contain the text for each document
-            index_name: Existing Atlas Vector Search Index
+            index_name: Existing Atlas Search Index
             embedding_key: Field that will contain the embedding for each document
             vector_index_name: Name of the Atlas Vector Search index
             relevance_score_fn: The similarity score used for the index
@@ -230,6 +230,8 @@ class MongoDBAtlasVectorSearch(VectorStore):
         self._text_key = text_key
         self._embedding_key = embedding_key
         self._relevance_score_fn = relevance_score_fn
+        # Check if collection is async
+        self._is_async = not isinstance(collection, Collection)
 
     @property
     def embeddings(self) -> Embeddings:
@@ -242,6 +244,10 @@ class MongoDBAtlasVectorSearch(VectorStore):
     @collection.setter
     def collection(self, value: Collection) -> None:
         self._collection = value
+
+    def _require_async_method(self, method_name: str, alternative_method_name: str):
+        if self._is_async:
+            raise ValueError(f"Async MongoDBAtlasVectorSearch does not support {method_name}. Use {alternative_method_name} instead.")
 
     def _select_relevance_score_fn(self) -> Callable[[float], float]:
         scoring: dict[str, Callable] = {
@@ -311,6 +317,7 @@ class MongoDBAtlasVectorSearch(VectorStore):
             List of ids added to the vectorstore.
         """
 
+        self._require_async_method("add_texts", "aadd_texts")
         # Check to see if metadata includes ids
         if metadatas is not None and (
             metadatas[0].get("_id") or metadatas[0].get("id")
@@ -362,6 +369,37 @@ class MongoDBAtlasVectorSearch(VectorStore):
             result_ids.extend(batch_res)
         return result_ids
 
+    # Async version of add_texts
+    async def aadd_texts(
+        self,
+        texts: Iterable[str],
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        ids: Optional[List[str]] = None,
+        batch_size: int = DEFAULT_INSERT_BATCH_SIZE,
+        **kwargs: Any,
+    ) -> List[str]:
+        text_list = list(texts)
+        if metadatas is None:
+            meta_list = [{} for _ in text_list]
+        else:
+            meta_list = list(metadatas)
+
+        result_ids: List[str] = []
+        start = 0
+        n_texts = len(text_list)
+        for end in range(batch_size, n_texts + batch_size, batch_size):
+            chunk_texts = text_list[start:end]
+            chunk_metas = meta_list[start:end]
+            if ids:
+                chunk_ids = ids[start:end]
+                batch_res = await self.abulk_embed_and_insert_texts(chunk_texts, chunk_metas, chunk_ids)
+            else:
+                batch_res = await self.abulk_embed_and_insert_texts(chunk_texts, chunk_metas)
+            result_ids.extend(batch_res)
+            start = end
+
+        return result_ids
+    
     def bulk_embed_and_insert_texts(
         self,
         texts: Union[List[str], Iterable[str]],
@@ -394,7 +432,39 @@ class MongoDBAtlasVectorSearch(VectorStore):
         # insert the documents in MongoDB Atlas
         insert_result = self._collection.insert_many(to_insert)  # type: ignore
         return [oid_to_str(_id) for _id in insert_result.inserted_ids]
-
+    
+    # Async version of bulk_embed_and_insert_texts
+    async def abulk_embed_and_insert_texts(
+        self,
+        texts: List[str],
+        metadatas: List[Dict[str, Any]],
+        ids: Optional[List[str]] = None,
+    ) -> List[str]:
+        if not texts:
+            return []
+        embeddings = self._embedding.embed_documents(texts)
+        if ids:
+            to_insert = [
+                {
+                    "_id": str_to_oid(i),
+                    self._text_key: t,
+                    self._embedding_key: emb,
+                    **m,
+                }
+                for i, t, m, emb in zip(ids, texts, metadatas, embeddings)
+            ]
+        else:
+            to_insert = [
+                {
+                    self._text_key: t,
+                    self._embedding_key: emb,
+                    **m,
+                }
+                for t, m, emb in zip(texts, metadatas, embeddings)
+            ]
+        insert_result = await self._collection.insert_many(to_insert)  # type: ignore
+        return [oid_to_str(_id) for _id in insert_result.inserted_ids]
+    
     def add_documents(
         self,
         documents: List[Document],
@@ -478,6 +548,29 @@ class MongoDBAtlasVectorSearch(VectorStore):
         )
         return docs
 
+    # Async version of similarity_search_with_score
+    async def asimilarity_search_with_score(
+        self,
+        query: str,
+        k: int = 4,
+        pre_filter: Optional[Dict[str, Any]] = None,
+        post_filter_pipeline: Optional[List[Dict[str, Any]]] = None,
+        oversampling_factor: int = 10,
+        include_embeddings: bool = False,
+        **kwargs: Any,
+    ) -> List[Tuple[Document, float]]:
+        embedding = self._embedding.embed_query(query)
+        docs = await self._asimilarity_search_with_score(
+            embedding,
+            k=k,
+            pre_filter=pre_filter,
+            post_filter_pipeline=post_filter_pipeline,
+            oversampling_factor=oversampling_factor,
+            include_embeddings=include_embeddings,
+            **kwargs,
+        )
+        return docs
+    
     def similarity_search(
         self,
         query: str,
@@ -511,6 +604,9 @@ class MongoDBAtlasVectorSearch(VectorStore):
         Returns:
             List of documents most similar to the query and their scores.
         """
+        
+        self._require_async_method("similarity_search", "asimilarity_search")
+        
         docs_and_scores = self.similarity_search_with_score(
             query,
             k=k,
@@ -526,6 +622,32 @@ class MongoDBAtlasVectorSearch(VectorStore):
                 doc.metadata["score"] = score
         return [doc for doc, _ in docs_and_scores]
 
+    # Async version of similarity_search
+    async def asimilarity_search(
+        self,
+        query: str,
+        k: int = 4,
+        pre_filter: Optional[Dict[str, Any]] = None,
+        post_filter_pipeline: Optional[List[Dict[str, Any]]] = None,
+        oversampling_factor: int = 10,
+        include_scores: bool = False,
+        include_embeddings: bool = False,
+        **kwargs: Any,
+    ) -> List[Document]:
+        docs_and_scores = await self.asimilarity_search_with_score(
+            query,
+            k,
+            pre_filter,
+            post_filter_pipeline,
+            oversampling_factor,
+            include_embeddings,
+            **kwargs,
+        )
+        if include_scores:
+            for doc, score in docs_and_scores:
+                doc.metadata["score"] = score
+        return [doc for doc, _ in docs_and_scores]
+    
     def max_marginal_relevance_search(
         self,
         query: str,
@@ -555,6 +677,8 @@ class MongoDBAtlasVectorSearch(VectorStore):
         Returns:
             List of documents selected by maximal marginal relevance.
         """
+        self._require_async_method("max_marginal_relevance_search", "amax_marginal_relevance_search")
+        
         return self.max_marginal_relevance_search_by_vector(
             embedding=self._embedding.embed_query(query),
             k=k,
@@ -610,12 +734,30 @@ class MongoDBAtlasVectorSearch(VectorStore):
         vectorstore.add_texts(texts=texts, metadatas=metadatas, ids=ids, **kwargs)
         return vectorstore
 
+    # Async version of from_texts
+    @classmethod
+    async def afrom_texts(
+        cls,
+        texts: List[str],
+        embedding: Embeddings,
+        collection: Any,
+        metadatas: Optional[List[Dict]] = None,
+        ids: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> MongoDBAtlasVectorSearch:
+        """
+        The actual async version that does the same job as from_texts().
+        """
+        vectorstore = cls(collection, embedding, **kwargs)
+        await vectorstore.aadd_texts(texts, metadatas=metadatas, ids=ids)
+        return vectorstore
+    
     def delete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
-        """Delete documents from VectorStore by ids.
+        """Delete by vector ID or other criteria.
 
         Args:
             ids: List of ids to delete.
-            **kwargs: Other keyword arguments passed to Collection.delete_many()
+            **kwargs: Other keyword arguments that subclasses might use.
 
         Returns:
             Optional[bool]: True if deletion is successful,
@@ -640,7 +782,16 @@ class MongoDBAtlasVectorSearch(VectorStore):
             Optional[bool]: True if deletion is successful,
             False otherwise, None if not implemented.
         """
-        return await run_in_executor(None, self.delete, ids=ids, **kwargs)
+        filter = {}
+        if ids:
+            oids = [str_to_oid(i) for i in ids]
+            filter = {"_id": {"$in": oids}}
+            
+        if self._is_async:
+            result = await self._collection.delete_many(filter=filter, **kwargs)
+            return result.acknowledged
+        else:
+            return await run_in_executor(None, self.delete, ids=ids, **kwargs)
 
     def max_marginal_relevance_search_by_vector(
         self,
@@ -676,6 +827,7 @@ class MongoDBAtlasVectorSearch(VectorStore):
         Returns:
             List of Documents selected by maximal marginal relevance.
         """
+        self._require_async_method("max_marginal_relevance_search_by_vector", "amax_marginal_relevance_search_by_vector")
         docs = self._similarity_search_with_score(
             embedding,
             k=fetch_k,
@@ -694,6 +846,16 @@ class MongoDBAtlasVectorSearch(VectorStore):
         mmr_docs = [docs[i][0] for i in mmr_doc_indexes]
         return mmr_docs
 
+    async def amax_marginal_relevance_search(
+        self,
+        query: str,
+        k: int = 4,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        **kwargs: Any,
+    ) -> List[Document]:
+        return await self.amax_marginal_relevance_search_by_vector(embedding=self._embedding.embed_query(query), k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, **kwargs)
+
     async def amax_marginal_relevance_search_by_vector(
         self,
         embedding: List[float],
@@ -705,19 +867,46 @@ class MongoDBAtlasVectorSearch(VectorStore):
         oversampling_factor: int = 10,
         **kwargs: Any,
     ) -> List[Document]:
-        """Return docs selected using the maximal marginal relevance."""
-        return await run_in_executor(
-            None,
-            self.max_marginal_relevance_search_by_vector,  # type: ignore[arg-type]
+        """Return docs selected using the maximal marginal relevance.
+
+        Maximal marginal relevance optimizes for similarity to query AND diversity
+        among selected documents.
+
+        Args:
+            embedding: Embedding to look up documents similar to.
+            k: Number of Documents to return. Defaults to 4.
+            fetch_k: Number of Documents to fetch to pass to MMR algorithm.
+            lambda_mult: Number between 0 and 1 that determines the degree
+                        of diversity among the results with 0 corresponding
+                        to maximum diversity and 1 to minimum diversity.
+                        Defaults to 0.5.
+            pre_filter: (Optional) dictionary of arguments to filter document fields on.
+            post_filter_pipeline: (Optional) pipeline of MongoDB aggregation stages
+                following the vectorSearch stage.
+            oversampling_factor: Multiple of k used when generating number
+                of candidates in HNSW Vector Search,
+            kwargs: Additional arguments are specific to the search_type
+
+        Returns:
+            List of Documents selected by maximal marginal relevance.
+        """
+        docs = await self._asimilarity_search_with_score(
             embedding,
-            k=k,
-            fetch_k=fetch_k,
-            lambda_mult=lambda_mult,
+            k=fetch_k,
             pre_filter=pre_filter,
             post_filter_pipeline=post_filter_pipeline,
+            include_embeddings=True,
             oversampling_factor=oversampling_factor,
             **kwargs,
         )
+        mmr_doc_indexes = maximal_marginal_relevance(
+            np.array(embedding),
+            [doc.metadata[self._embedding_key] for doc, _ in docs],
+            k=k,
+            lambda_mult=lambda_mult,
+        )
+        mmr_docs = [docs[i][0] for i in mmr_doc_indexes]
+        return mmr_docs
 
     def _similarity_search_with_score(
         self,
@@ -731,6 +920,7 @@ class MongoDBAtlasVectorSearch(VectorStore):
     ) -> List[Tuple[Document, float]]:
         """Core search routine. See external methods for details."""
 
+        self._require_async_method("_similarity_search_with_score", "asimilarity_search_with_score")
         # Atlas Vector Search, potentially with filter
         pipeline = [
             vector_search_stage(
@@ -764,6 +954,47 @@ class MongoDBAtlasVectorSearch(VectorStore):
             docs.append((Document(page_content=text, metadata=res), score))
         return docs
 
+    # Async version of _similarity_search_with_score
+    async def _asimilarity_search_with_score(
+        self,
+        query_vector: List[float],
+        k: int = 4,
+        pre_filter: Optional[Dict[str, Any]] = None,
+        post_filter_pipeline: Optional[List[Dict]] = None,
+        oversampling_factor: int = 10,
+        include_embeddings: bool = False,
+        **kwargs: Any,
+    ) -> List[Tuple[Document, float]]:
+        """Async version of core search routine."""
+        pipeline = [
+            vector_search_stage(
+                query_vector,
+                self._embedding_key,
+                self._index_name,
+                k,
+                pre_filter,
+                oversampling_factor,
+                **kwargs,
+            ),
+            {"$set": {"score": {"$meta": "vectorSearchScore"}}},
+        ]
+        
+        if not include_embeddings:
+            pipeline.append({"$project": {self._embedding_key: 0}})
+        if post_filter_pipeline:
+            pipeline.extend(post_filter_pipeline)
+        
+        async_cursor = await self._collection.aggregate(pipeline)
+        docs: List[Tuple[Document, float]] = []
+        
+        # Format
+        async for res in async_cursor:
+            text = res.pop(self._text_key)
+            score = res.pop("score")
+            make_serializable(res)
+            docs.append((Document(page_content=text, metadata=res), score))
+        return docs
+    
     def create_vector_search_index(
         self,
         dimensions: int,
