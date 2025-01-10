@@ -60,7 +60,7 @@ markers = [
 asyncio_mode = "auto"
 
 [tool.mypy]
-disallow_untyped_defs = "True"
+disallow_untyped_defs = true
 
 [tool.ruff]
 lint.select = [
