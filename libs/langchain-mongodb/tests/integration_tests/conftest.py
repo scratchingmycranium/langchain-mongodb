@@ -3,6 +3,7 @@ from typing import List, Generator, AsyncGenerator
 
 import pytest
 import pytest_asyncio
+import asyncio
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -27,13 +28,11 @@ def technical_report_pages() -> List[Document]:
 
 @pytest.fixture(scope="session")
 def connection_string() -> str:
-    print(f"MONGODB_URI: {MONGODB_URI}")
     return MONGODB_URI
 
 
 @pytest.fixture(scope="session")
 def client() -> Generator[MongoClient, None, None]:
-    print(f"MONGODB_URI: {MONGODB_URI}")
     """Sync client fixture."""
     client = MongoClient(
         MONGODB_URI,
@@ -42,11 +41,20 @@ def client() -> Generator[MongoClient, None, None]:
     yield client
     client.close()
 
+@pytest.fixture(scope="session")
+def event_loop():
+    """
+    Create an instance of the event loop for the entire test session.
+    By default, pytest-asyncio uses function-level loops, 
+    which can sometimes cause unexpected closures across modules.
+    """
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
 
 @pytest_asyncio.fixture(scope="session")
 async def motor_client() -> AsyncGenerator[AsyncIOMotorClient, None]:
     """Motor async client fixture."""
-    print(f"MONGODB_URI: {MONGODB_URI}")
     client = AsyncIOMotorClient(
         MONGODB_URI,
         driver=DriverInfo(name="Langchain Tests", version="test-version")
@@ -57,7 +65,6 @@ async def motor_client() -> AsyncGenerator[AsyncIOMotorClient, None]:
 @pytest_asyncio.fixture(scope="session")
 async def pymongo_async_client() -> AsyncGenerator[AsyncMongoClient, None]:
     """PyMongo beta async client fixture."""
-    print(f"MONGODB_URI: {MONGODB_URI}")
     client = AsyncMongoClient(
         MONGODB_URI,
         driver=DriverInfo(name="Langchain Tests", version="test-version")

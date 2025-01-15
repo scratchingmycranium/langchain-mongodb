@@ -140,7 +140,7 @@ def test_vectorstore_create_vector_search_index(collection: Collection) -> None:
 
 
 @pytest.fixture(
-    scope="module",
+    scope="function",
     params=[
         pytest.param("pymongo", id="pymongo"),
         pytest.param("motor", id="motor")
@@ -162,7 +162,8 @@ async def async_collection(request, pymongo_async_client: AsyncMongoClient, moto
     
     await collection.delete_many({})
 
-@pytest.mark.asyncio(loop_scope="session")
+
+@pytest.mark.asyncio
 async def test_search_index_drop_add_delete_commands_async(async_collection: AsyncCollections) -> None:
     index_name = VECTOR_INDEX_NAME
     dimensions = DIMENSIONS
@@ -205,7 +206,7 @@ async def test_search_index_drop_add_delete_commands_async(async_collection: Asy
 
 
 @pytest.mark.skip("collection.update_vector_search_index requires [CLOUDP-275518]")
-@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.asyncio
 async def test_search_index_update_vector_search_index_async(async_collection: AsyncCollections) -> None:
     index_name = "INDEX_TO_UPDATE"
     similarity_orig = "cosine"
@@ -248,7 +249,7 @@ async def test_search_index_update_vector_search_index_async(async_collection: A
     assert indexes[0]["latestDefinition"]["fields"][0]["similarity"] == similarity_new
 
 
-@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.asyncio
 async def test_vectorstore_create_vector_search_index_async(async_collection: AsyncCollections) -> None:
     """Tests vectorstore wrapper around index command with async client."""
 

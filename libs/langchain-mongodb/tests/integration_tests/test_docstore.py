@@ -35,7 +35,7 @@ def test_docstore(client: MongoClient, technical_report_pages: List[Document]) -
     assert all(isinstance(sample[i], Document) for i in [0, 1, 3])
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(scope="function")
 @pytest.mark.parametrize(
     "client_name",
     [

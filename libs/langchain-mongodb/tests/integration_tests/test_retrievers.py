@@ -214,7 +214,7 @@ def test_fulltext_retriever(
 # Async variants of the tests
 
 @pytest.fixture(
-    scope="module",
+    scope="function",
     params=[
         pytest.param("pymongo", id="pymongo"),
         pytest.param("motor", id="motor")
@@ -242,7 +242,7 @@ async def async_collection(request, pymongo_async_client: AsyncMongoClient, moto
 
 
 @pytest.fixture(
-    scope="module",
+    scope="function",
     params=[
         pytest.param("pymongo", id="pymongo"),
         pytest.param("motor", id="motor")
@@ -269,7 +269,7 @@ async def async_collection_nested(request, pymongo_async_client: AsyncMongoClien
     await collection.delete_many({})
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 async def async_indexed_vectorstore(
     async_collection: AsyncCollections,
     example_documents: List[Document],
@@ -291,7 +291,7 @@ async def async_indexed_vectorstore(
     await vectorstore.collection.delete_many({})
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 async def async_indexed_nested_vectorstore(
     async_collection_nested: AsyncCollections,
     example_documents: List[Document],
@@ -313,7 +313,7 @@ async def async_indexed_nested_vectorstore(
     await vectorstore.collection.delete_many({})
 
 
-@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.asyncio
 async def test_vector_retriever_async(async_indexed_vectorstore: PatchedMongoDBAtlasVectorSearch) -> None:
     """Test VectorStoreRetriever with async client"""
     retriever = async_indexed_vectorstore.as_retriever()
@@ -328,7 +328,7 @@ async def test_vector_retriever_async(async_indexed_vectorstore: PatchedMongoDBA
     assert "New Orleans" in results[0].page_content
 
 
-@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.asyncio
 async def test_hybrid_retriever_async(async_indexed_vectorstore: PatchedMongoDBAtlasVectorSearch) -> None:
     """Test basic usage of MongoDBAtlasHybridSearchRetriever with async client"""
     retriever = MongoDBAtlasHybridSearchRetriever(
@@ -347,7 +347,7 @@ async def test_hybrid_retriever_async(async_indexed_vectorstore: PatchedMongoDBA
     assert "New Orleans" in results[0].page_content
 
 
-@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.asyncio
 async def test_hybrid_retriever_nested_async(
     async_indexed_nested_vectorstore: PatchedMongoDBAtlasVectorSearch,
 ) -> None:
@@ -368,7 +368,7 @@ async def test_hybrid_retriever_nested_async(
     assert "New Orleans" in results[0].page_content
 
 
-@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.asyncio
 async def test_fulltext_retriever_async(
     async_indexed_vectorstore: PatchedMongoDBAtlasVectorSearch,
 ) -> None:

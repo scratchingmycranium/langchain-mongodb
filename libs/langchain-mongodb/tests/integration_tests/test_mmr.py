@@ -34,10 +34,13 @@ def collection(client: MongoClient) -> Collection:
         ) \
         .sync_collection(client)
 
-@pytest.fixture(params=[
-    pytest.param("pymongo", id="pymongo"),
-    pytest.param("motor", id="motor")
-])
+@pytest.fixture(
+    scope="function",
+    params=[
+        pytest.param("pymongo", id="pymongo"),
+        pytest.param("motor", id="motor")
+    ]
+)
 async def async_collection(request, pymongo_async_client: AsyncMongoClient, motor_client: AsyncIOMotorClient) -> AsyncCollections:
     collection = await (
         IntegrationTestCollection(DB_NAME, COLLECTION_NAME)

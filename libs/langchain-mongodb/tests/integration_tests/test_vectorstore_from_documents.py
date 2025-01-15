@@ -29,10 +29,13 @@ INDEX_NAME = "langchain-test-index-from-documents"
 DIMENSIONS = 5
 
 
-@pytest.fixture(params=[
-    pytest.param("pymongo", id="pymongo"),
-    pytest.param("motor", id="motor")
-])
+@pytest.fixture(
+    scope="function",
+    params=[
+        pytest.param("pymongo", id="pymongo"),
+        pytest.param("motor", id="motor")
+    ]
+)
 async def async_collection(request, pymongo_async_client: AsyncMongoClient, motor_client: AsyncIOMotorClient) -> AsyncCollections:
     collection = await (
         IntegrationTestCollection(DB_NAME, COLLECTION_NAME)
@@ -51,15 +54,6 @@ async def async_collection(request, pymongo_async_client: AsyncMongoClient, moto
     
     # Clean up after the test
     await collection.delete_many({})
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create an instance of the default event loop for each test case."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
-
 
 @pytest.fixture(scope="module")
 def collection(client: MongoClient) -> Collection:

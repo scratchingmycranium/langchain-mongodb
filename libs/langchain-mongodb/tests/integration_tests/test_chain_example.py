@@ -141,7 +141,7 @@ def test_chain(
     not os.environ.get("OPENAI_API_KEY"),
     reason="Requires OpenAI for chat responses.",
 )
-@pytest.mark.asyncio
+@pytest.mark.asyncio(scope="function")
 @pytest.mark.parametrize(
     "async_collection",
     [
