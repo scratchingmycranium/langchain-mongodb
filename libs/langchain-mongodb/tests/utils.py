@@ -270,6 +270,7 @@ class MockCollection(Collection):
         params = pipeline[0]["$vectorSearch"]
         # Assumes MongoDBAtlasSemanticCache.LLM == "llm_string"
         llm_string = params["filter"][MongoDBAtlasSemanticCache.LLM]["$eq"]
+        embedding = params["queryVector"]
 
         acc = []
         for document in self._data:
@@ -366,10 +367,6 @@ class AsyncMockCollection:
         self._simulate_cache_aggregation_query = False
 
     async def delete_many(self, flt: Dict[str, Any] = None, *args, **kwargs) -> DeleteResult:
-        if flt is None:
-            flt = {}
-        old_len = len(self._data)
-
         # If it's a simple {"_id": {"$in": [...]}} filter, handle that explicitly:
         in_ids = set()
         # Check if we have {"_id": {"$in": [...]}}, else do a more general fallback
@@ -464,7 +461,7 @@ class IntegrationTestCollection:
         self,
         db_name: str = "test_db",
         collection_name: str = "test_collection", 
-        filters: List[str] = ["c"],
+        filters: Optional[List[str]] = None,
         path: str = "embedding",
         similarity: str = "cosine",
         dimensions: int = 5,
@@ -472,7 +469,7 @@ class IntegrationTestCollection:
     ) -> None:
         self.DB_NAME = db_name
         self.COLLECTION_NAME = collection_name
-        self.FILTERS = filters
+        self.FILTERS = filters if filters is not None else ["c"]
         self.PATH = path
         self.SIMILARITY = similarity
         self.DIMENSIONS = dimensions
