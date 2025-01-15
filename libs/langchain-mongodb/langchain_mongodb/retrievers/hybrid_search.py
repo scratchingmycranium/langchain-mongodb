@@ -1,9 +1,13 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from langchain_core.callbacks.manager import CallbackManagerForRetrieverRun
+from langchain_core.callbacks.manager import (
+    CallbackManagerForRetrieverRun,
+    AsyncCallbackManagerForRetrieverRun,
+)
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 from pymongo.collection import Collection
+from motor.motor_asyncio import AsyncIOMotorCollection
 
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_mongodb.pipelines import (
@@ -13,7 +17,7 @@ from langchain_mongodb.pipelines import (
     text_search_stage,
     vector_search_stage,
 )
-from langchain_mongodb.utils import make_serializable
+from langchain_mongodb.utils import make_serializable, AsyncCollectionWrapper
 
 
 class MongoDBAtlasHybridSearchRetriever(BaseRetriever):
@@ -46,7 +50,7 @@ class MongoDBAtlasHybridSearchRetriever(BaseRetriever):
     """If true, returned Document metadata will include vectors."""
 
     @property
-    def collection(self) -> Collection:
+    def collection(self) -> Union[Collection, AsyncIOMotorCollection]:
         return self.vectorstore._collection
 
     def _get_relevant_documents(
@@ -121,6 +125,79 @@ class MongoDBAtlasHybridSearchRetriever(BaseRetriever):
         for res in cursor:
             text = res.pop(self.vectorstore._text_key)
             # score = res.pop("score")  # The score remains buried!
+            make_serializable(res)
+            docs.append(Document(page_content=text, metadata=res))
+        return docs
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: AsyncCallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        """Retrieve documents that are highest scoring / most similar to query.
+
+        Note that the same query is used in both searches,
+        embedded for vector search, and as-is for full-text search.
+
+        Args:
+            query: String to find relevant documents for
+            run_manager: The callback handler to use
+        Returns:
+            List of relevant documents
+        """
+
+        query_vector = await self.vectorstore._embedding.aembed_query(query)
+
+        scores_fields = ["vector_score", "fulltext_score"]
+        pipeline: List[Any] = []
+
+        # First we build up the aggregation pipeline,
+        # then it is passed to the server to execute
+        # Vector Search stage
+        vector_pipeline = [
+            vector_search_stage(
+                query_vector=query_vector,
+                search_field=self.vectorstore._embedding_key,
+                index_name=self.vectorstore._index_name,
+                top_k=self.top_k,
+                filter=self.pre_filter,
+                oversampling_factor=self.oversampling_factor,
+            )
+        ]
+        vector_pipeline += reciprocal_rank_stage("vector_score", self.vector_penalty)
+
+        combine_pipelines(pipeline, vector_pipeline, self.collection.name)
+
+        # Full-Text Search stage
+        text_pipeline = text_search_stage(
+            query=query,
+            search_field=self.vectorstore._text_key,
+            index_name=self.search_index_name,
+            limit=self.top_k,
+            filter=self.pre_filter,
+        )
+
+        text_pipeline.extend(
+            reciprocal_rank_stage("fulltext_score", self.fulltext_penalty)
+        )
+
+        combine_pipelines(pipeline, text_pipeline, self.collection.name)
+
+        # Sum and sort stage
+        pipeline.extend(
+            final_hybrid_stage(scores_fields=scores_fields, limit=self.top_k)
+        )
+
+        # Removal of embeddings unless requested.
+        if not self.show_embeddings:
+            pipeline.append({"$project": {self.vectorstore._embedding_key: 0}})
+        # Post filtering
+        if self.post_filter is not None:
+            pipeline.extend(self.post_filter)
+
+        # Execution
+        collection_wrapper = AsyncCollectionWrapper(self.collection)
+        docs = []
+        async for res in collection_wrapper.aggregate(pipeline):
+            text = res.pop(self.vectorstore._text_key)
             make_serializable(res)
             docs.append(Document(page_content=text, metadata=res))
         return docs

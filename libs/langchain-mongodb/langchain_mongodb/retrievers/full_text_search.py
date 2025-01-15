@@ -1,12 +1,17 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from langchain_core.callbacks.manager import CallbackManagerForRetrieverRun
+from langchain_core.callbacks.manager import (
+    CallbackManagerForRetrieverRun,
+    AsyncCallbackManagerForRetrieverRun,
+)
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 from pymongo.collection import Collection
+from motor.motor_asyncio import AsyncIOMotorCollection
+from pymongo.asynchronous.collection import AsyncCollection
 
 from langchain_mongodb.pipelines import text_search_stage
-from langchain_mongodb.utils import make_serializable
+from langchain_mongodb.utils import make_serializable, AsyncCollectionWrapper
 
 
 class MongoDBAtlasFullTextSearchRetriever(BaseRetriever):
@@ -14,7 +19,7 @@ class MongoDBAtlasFullTextSearchRetriever(BaseRetriever):
     using Lucene's standard (BM25) analyzer.
     """
 
-    collection: Collection
+    collection: Union[Collection, AsyncIOMotorCollection, AsyncCollection]
     """MongoDB Collection on an Atlas cluster"""
     search_index_name: str
     """Atlas Search Index name"""
@@ -54,6 +59,36 @@ class MongoDBAtlasFullTextSearchRetriever(BaseRetriever):
         # Formatting
         docs = []
         for res in cursor:
+            text = res.pop(self.search_field)
+            make_serializable(res)
+            docs.append(Document(page_content=text, metadata=res))
+        return docs
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: AsyncCallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        """Retrieve documents that are highest scoring / most similar to query.
+
+        Args:
+            query: String to find relevant documents for
+            run_manager: The callback handler to use
+        Returns:
+            List of relevant documents
+        """
+
+        pipeline = text_search_stage(  # type: ignore
+            query=query,
+            search_field=self.search_field,
+            index_name=self.search_index_name,
+            limit=self.top_k,
+            filter=self.filter,
+            include_scores=self.include_scores,
+        )
+
+        # Execution
+        collection_wrapper = AsyncCollectionWrapper(self.collection)
+        docs = []
+        async for res in collection_wrapper.aggregate(pipeline):
             text = res.pop(self.search_field)
             make_serializable(res)
             docs.append(Document(page_content=text, metadata=res))

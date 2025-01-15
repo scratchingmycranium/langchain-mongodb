@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import pytest  # type: ignore[import-not-found]
+from typing import Union
 from langchain_core.embeddings import Embeddings
-from pymongo import MongoClient
+from pymongo import MongoClient, AsyncMongoClient
+from motor.motor_asyncio import (
+    AsyncIOMotorClient,
+)
 from pymongo.collection import Collection
-
-from langchain_mongodb.index import (
-    create_vector_search_index,
+from ..utils import (
+    IntegrationTestCollection,
+    AsyncCollections
 )
 
 from ..utils import ConsistentFakeEmbeddings, PatchedMongoDBAtlasVectorSearch
@@ -18,29 +22,38 @@ COLLECTION_NAME = "langchain_test_vectorstores"
 INDEX_NAME = "langchain-test-index-vectorstores"
 DIMENSIONS = 5
 
-
 @pytest.fixture()
 def collection(client: MongoClient) -> Collection:
-    if COLLECTION_NAME not in client[DB_NAME].list_collection_names():
-        clxn = client[DB_NAME].create_collection(COLLECTION_NAME)
-    else:
-        clxn = client[DB_NAME][COLLECTION_NAME]
-
-    clxn.delete_many({})
-
-    if not any([INDEX_NAME == ix["name"] for ix in clxn.list_search_indexes()]):
-        create_vector_search_index(
-            collection=clxn,
+    return IntegrationTestCollection(DB_NAME, COLLECTION_NAME) \
+        .vector_search_index(
             index_name=INDEX_NAME,
-            dimensions=5,
-            path="embedding",
             filters=["c"],
+            path="embedding",
             similarity="cosine",
-            wait_until_complete=60,
+            dimensions=DIMENSIONS
+        ) \
+        .sync_collection(client)
+
+@pytest.fixture(params=[
+    pytest.param("pymongo", id="pymongo"),
+    pytest.param("motor", id="motor")
+])
+async def async_collection(request, pymongo_async_client: AsyncMongoClient, motor_client: AsyncIOMotorClient) -> AsyncCollections:
+    collection = await (
+        IntegrationTestCollection(DB_NAME, COLLECTION_NAME)
+        .vector_search_index(
+            index_name=INDEX_NAME,
+            filters=["c"],
+            path="embedding",
+            similarity="cosine",
+            dimensions=DIMENSIONS
         )
-
-    return clxn
-
+        .async_collection(request, pymongo_async_client, motor_client)
+    )
+    
+    yield collection
+    
+    await collection.delete_many({})
 
 @pytest.fixture
 def embeddings() -> Embeddings:
@@ -58,6 +71,26 @@ def test_mmr(embeddings: Embeddings, collection: Collection) -> None:
     )
     query = "foo"
     output = vectorstore.max_marginal_relevance_search(query, k=10, lambda_mult=0.1)
+    assert len(output) == len(texts)
+    assert output[0].page_content == "foo"
+    assert output[1].page_content != "foo"
+
+@pytest.mark.asyncio
+async def test_mmr_async(embeddings: Embeddings, async_collection: AsyncCollections):
+    texts = ["foo", "foo", "fou", "foy"]
+    print('debug 0')
+    await async_collection.delete_many({})
+    print('debug 1')
+    vectorstore = await PatchedMongoDBAtlasVectorSearch.afrom_texts(
+        texts,
+        embedding=embeddings,
+        collection=async_collection,
+        index_name=INDEX_NAME,
+    )
+    query = "foo"
+    print('debug 2')
+    output = await vectorstore.amax_marginal_relevance_search(query, k=10, lambda_mult=0.1)
+    print('debug 3')
     assert len(output) == len(texts)
     assert output[0].page_content == "foo"
     assert output[1].page_content != "foo"

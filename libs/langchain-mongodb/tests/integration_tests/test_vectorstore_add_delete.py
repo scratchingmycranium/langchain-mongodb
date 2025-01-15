@@ -3,23 +3,62 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import asyncio
 
 import pytest  # type: ignore[import-not-found]
 from bson import ObjectId
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
-from pymongo import MongoClient
+from pymongo import MongoClient, AsyncMongoClient
 from pymongo.collection import Collection
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_mongodb.utils import oid_to_str
 
-from ..utils import ConsistentFakeEmbeddings, PatchedMongoDBAtlasVectorSearch
+from ..utils import (
+    ConsistentFakeEmbeddings,
+    PatchedMongoDBAtlasVectorSearch,
+    IntegrationTestCollection,
+    AsyncCollections,
+)
 
 DB_NAME = "langchain_test_db"
 INDEX_NAME = "langchain-test-index-vectorstores"
 COLLECTION_NAME = "langchain_test_vectorstores"
 DIMENSIONS = 5
+
+
+@pytest.fixture(params=[
+    pytest.param("pymongo", id="pymongo"),
+    pytest.param("motor", id="motor")
+])
+async def async_collection(request, pymongo_async_client: AsyncMongoClient, motor_client: AsyncIOMotorClient) -> AsyncCollections:
+    collection = await (
+        IntegrationTestCollection(DB_NAME, COLLECTION_NAME)
+        .vector_search_index(
+            index_name=INDEX_NAME,
+            filters=["c"],
+            path="embedding",
+            similarity="cosine",
+            dimensions=DIMENSIONS
+        )
+        .async_collection(request, pymongo_async_client, motor_client)
+    )
+    
+    # Clean up the collection after each test
+    yield collection
+    
+    # Clean up after the test
+    await collection.delete_many({})
+
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create an instance of the default event loop for each test case."""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
 
 
 @pytest.fixture(scope="module")
@@ -206,3 +245,149 @@ def test_add_documents(
     result_ids = vectorstore.add_documents(docs, ids, batch_size=batch_size)
     assert len(result_ids) == n_docs
     assert set(ids) == set(collection.distinct("_id"))
+
+
+@pytest.mark.asyncio
+async def test_delete_async(
+    trivial_embeddings: Embeddings,
+    async_collection: AsyncCollections,
+    texts: List[str]
+) -> None:
+    vectorstore = MongoDBAtlasVectorSearch(
+        collection=async_collection,
+        embedding=trivial_embeddings,
+        index_name="MATCHES_NOTHING",
+    )
+    await async_collection.delete_many({})
+    assert await async_collection.count_documents({}) == 0
+    
+    ids = await vectorstore.aadd_texts(texts)
+    assert await async_collection.count_documents({}) == len(texts)
+
+    deleted = await vectorstore.adelete(ids[-2:])
+    assert deleted
+    assert await async_collection.count_documents({}) == len(texts) - 2
+
+    new_ids = await vectorstore.aadd_texts(["Pigs eat stuff", "Pigs eat sandwiches"])
+    assert set(new_ids).intersection(set(ids)) == set()  # new ids will be unique.
+    assert isinstance(new_ids, list)
+    assert all(isinstance(i, str) for i in new_ids)
+    assert len(new_ids) == 2
+    assert await async_collection.count_documents({}) == 4
+
+
+@pytest.mark.asyncio
+async def test_add_texts_async(
+    trivial_embeddings: Embeddings,
+    async_collection: AsyncCollections,
+    texts: List[str],
+) -> None:
+    """Tests API of add_texts with async client"""
+    metadatas: List[Dict[str, Any]] = [
+        {"a": 1},
+        {"b": 1},
+        {"c": 1},
+        {"d": 1, "e": 2},
+    ]
+
+    vectorstore = PatchedMongoDBAtlasVectorSearch(
+        collection=async_collection,
+        embedding=trivial_embeddings,
+        index_name=INDEX_NAME,
+    )
+    await vectorstore.adelete()
+
+    # Case 1. Add texts without ids
+    provided_ids = await vectorstore.aadd_texts(texts=texts, metadatas=metadatas)
+    cursor = async_collection.find({})
+    all_docs = await cursor.to_list(length=None)
+    assert all("_id" in doc for doc in all_docs)
+    docids = set(doc["_id"] for doc in all_docs)
+    assert all(isinstance(_id, ObjectId) for _id in docids)
+    assert set(provided_ids) == set(oid_to_str(oid) for oid in docids)
+
+    # Case 2: Test Document.metadata looks right. i.e. contains _id
+    search_res = await vectorstore.asimilarity_search_with_score("sandwich", k=1)
+    doc, score = search_res[0]
+    assert "_id" in doc.metadata
+
+    # Case 3: Add new ids that are 24-char hex strings
+    hex_ids = [oid_to_str(ObjectId()) for _ in range(2)]
+    hex_texts = ["Text for hex_id"] * len(hex_ids)
+    out_ids = await vectorstore.aadd_texts(texts=hex_texts, ids=hex_ids)
+    assert set(out_ids) == set(hex_ids)
+    assert await async_collection.count_documents({}) == len(texts) + len(hex_texts)
+    cursor = async_collection.find({})
+    all_docs = await cursor.to_list(length=None)
+    assert all(isinstance(doc["_id"], ObjectId) for doc in all_docs)
+
+    # Case 4: Add new ids that cannot be cast to ObjectId
+    str_ids = ["Sandwiches are beautiful,", "..sandwiches are fine."]
+    str_texts = str_ids  # No reason for them to differ
+    out_ids = await vectorstore.aadd_texts(texts=str_texts, ids=str_ids)
+    assert set(out_ids) == set(str_ids)
+    assert await async_collection.count_documents({}) == 8
+    res = await vectorstore.asimilarity_search("sandwich", k=8)
+    assert any(str_ids[0] in doc.metadata["_id"] for doc in res)
+
+    # Case 5: Test adding in multiple batches
+    batch_size = 2
+    batch_ids = [oid_to_str(ObjectId()) for _ in range(2 * batch_size)]
+    batch_texts = [f"Text for batch text {i}" for i in range(2 * batch_size)]
+    out_ids = await vectorstore.aadd_texts(
+        texts=batch_texts, ids=batch_ids, batch_size=batch_size
+    )
+    assert set(out_ids) == set(batch_ids)
+    assert await async_collection.count_documents({}) == 12
+
+
+@pytest.mark.asyncio
+async def test_add_documents_async(
+    async_collection: AsyncCollections,
+    trivial_embeddings: Embeddings,
+) -> None:
+    """Tests add_documents with async client."""
+    vectorstore = MongoDBAtlasVectorSearch(
+        collection=async_collection,
+        embedding=trivial_embeddings,
+        index_name="MATCHES_NOTHING",
+    )
+    await async_collection.delete_many({})
+    
+    # Case 1: No ids
+    n_docs = 10
+    batch_size = 3
+    docs = [
+        Document(page_content=f"document {i}", metadata={"i": i}) for i in range(n_docs)
+    ]
+    result_ids = await vectorstore.aadd_documents(documents=docs, batch_size=batch_size)
+    assert len(result_ids) == n_docs
+    assert await async_collection.count_documents({}) == n_docs
+
+    # Case 2: ids
+    await async_collection.delete_many({})
+    n_docs = 10
+    batch_size = 3
+    docs = [
+        Document(page_content=f"document {i}", metadata={"i": i}) for i in range(n_docs)
+    ]
+    ids = [str(i) for i in range(n_docs)]
+    result_ids = await vectorstore.aadd_documents(documents=docs, ids=ids, batch_size=batch_size)
+    assert len(result_ids) == n_docs
+    cursor = async_collection.find({})
+    all_docs = await cursor.to_list(length=None)
+    assert set(ids) == set(doc["_id"] for doc in all_docs)
+
+    # Case 3: Single batch
+    await async_collection.delete_many({})
+    n_docs = 3
+    batch_size = 10
+    docs = [
+        Document(page_content=f"document {i}", metadata={"i": i}) for i in range(n_docs)
+    ]
+    ids = [str(i) for i in range(n_docs)]
+    result_ids = await vectorstore.aadd_documents(documents=docs, ids=ids, batch_size=batch_size)
+    assert len(result_ids) == n_docs
+    cursor = async_collection.find({})
+    all_docs = await cursor.to_list(length=None)
+    assert set(ids) == set(doc["_id"] for doc in all_docs)

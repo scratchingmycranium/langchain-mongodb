@@ -6,15 +6,23 @@ from typing import Dict, Generator, List
 
 import pytest  # type: ignore[import-not-found]
 from langchain_core.embeddings import Embeddings
-from pymongo import MongoClient
+from pymongo import MongoClient, AsyncMongoClient
 from pymongo.collection import Collection
-
+from motor.motor_asyncio import (
+    AsyncIOMotorClient,
+)
+import asyncio
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_mongodb.index import (
     create_vector_search_index,
 )
 
-from ..utils import ConsistentFakeEmbeddings, PatchedMongoDBAtlasVectorSearch
+from ..utils import (
+    ConsistentFakeEmbeddings,
+    PatchedMongoDBAtlasVectorSearch,
+    IntegrationTestCollection,
+    AsyncCollections,
+)
 
 DB_NAME = "langchain_test_db"
 COLLECTION_NAME = "langchain_test_from_texts"
@@ -115,6 +123,108 @@ def test_search_pre_filter(
 ) -> None:
     # Test filtering with expected output
     matches_filter = vectorstore.similarity_search(
+        "Sandwich", k=3, pre_filter={"c": {"$gt": 0}}
+    )
+    assert len(matches_filter) == 1
+
+
+@pytest.fixture(params=[
+    pytest.param("pymongo", id="pymongo"),
+    pytest.param("motor", id="motor")
+])
+async def async_collection(request, pymongo_async_client: AsyncMongoClient, motor_client: AsyncIOMotorClient) -> AsyncCollections:
+    collection = await (
+        IntegrationTestCollection(DB_NAME, COLLECTION_NAME)
+        .vector_search_index(
+            index_name=INDEX_NAME,
+            filters=["c"],
+            path="embedding",
+            similarity="cosine",
+            dimensions=DIMENSIONS
+        )
+        .async_collection(request, pymongo_async_client, motor_client)
+    )
+    
+    # Clean up the collection after each test
+    yield collection
+    
+    # Clean up after the test
+    await collection.delete_many({})
+
+
+# Add event loop fixture to ensure proper loop management
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create an instance of the default event loop for each test case."""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest.mark.asyncio
+async def test_search_with_metadatas_and_pre_filter_async(
+    embeddings: Embeddings,
+    async_collection: AsyncCollections,
+    texts: List[str],
+    metadatas: List[Dict],
+) -> None:
+    await async_collection.delete_many({})
+    vectorstore = await PatchedMongoDBAtlasVectorSearch.afrom_texts(
+        texts=texts,
+        embedding=embeddings,
+        metadatas=metadatas,
+        collection=async_collection,
+        index_name=INDEX_NAME,
+    )
+    
+    # Confirm the presence of metadata in output
+    output = await vectorstore.asimilarity_search("Sandwich", k=1)
+    assert len(output) == 1
+    metakeys = [list(d.keys())[0] for d in metadatas]
+    assert any([key in output[0].metadata for key in metakeys])
+
+
+@pytest.mark.asyncio
+async def test_search_filters_all_async(
+    embeddings: Embeddings,
+    async_collection: AsyncCollections,
+    texts: List[str],
+    metadatas: List[Dict],
+) -> None:
+    await async_collection.delete_many({})
+    vectorstore = await PatchedMongoDBAtlasVectorSearch.afrom_texts(
+        texts=texts,
+        embedding=embeddings,
+        metadatas=metadatas,
+        collection=async_collection,
+        index_name=INDEX_NAME,
+    )
+    
+    # Test filtering out
+    does_not_match_filter = await vectorstore.asimilarity_search(
+        "Sandwich", k=1, pre_filter={"c": {"$lte": 0}}
+    )
+    assert does_not_match_filter == []
+
+
+@pytest.mark.asyncio
+async def test_search_pre_filter_async(
+    embeddings: Embeddings,
+    async_collection: AsyncCollections,
+    texts: List[str],
+    metadatas: List[Dict],
+) -> None:
+    await async_collection.delete_many({})
+    vectorstore = await PatchedMongoDBAtlasVectorSearch.afrom_texts(
+        texts=texts,
+        embedding=embeddings,
+        metadatas=metadatas,
+        collection=async_collection,
+        index_name=INDEX_NAME,
+    )
+    
+    # Test filtering with expected output
+    matches_filter = await vectorstore.asimilarity_search(
         "Sandwich", k=3, pre_filter={"c": {"$gt": 0}}
     )
     assert len(matches_filter) == 1

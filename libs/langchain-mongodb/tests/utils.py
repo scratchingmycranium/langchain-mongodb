@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from time import monotonic, sleep
 import math
-from typing import Any, Dict, Generator, Iterable, List, Mapping, Optional, Union, cast, AsyncIterator
+from typing import Any, Dict, Generator, Iterable, List, Mapping, Optional, Union, cast, AsyncIterator, AsyncIterable
 from bson import ObjectId
 from langchain_core.callbacks.manager import (
     AsyncCallbackManagerForLLMRun,
@@ -17,18 +17,31 @@ from langchain_core.messages import (
     BaseMessage,
 )
 from langchain_core.outputs import ChatGeneration, ChatResult
+from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import model_validator
 from pymongo.collection import Collection
 from pymongo.results import DeleteResult, InsertManyResult
+from pymongo import AsyncMongoClient, MongoClient
+from pymongo.asynchronous.collection import AsyncCollection
+from motor.motor_asyncio import AsyncIOMotorCollection
 
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_mongodb.cache import MongoDBAtlasSemanticCache
+from langchain_mongodb.index import (
+    acreate_vector_search_index,
+    acreate_fulltext_search_index,
+    create_vector_search_index,
+    create_fulltext_search_index
+)
 
 import asyncio
 
+# Constants for timeouts and intervals
 TIMEOUT = 120
 INTERVAL = 0.5
 
+# Type alias for async collections from either motor or pymongo
+AsyncCollections = Union[AsyncIOMotorClient, Collection]
 
 class PatchedMongoDBAtlasVectorSearch(MongoDBAtlasVectorSearch):
     def bulk_embed_and_insert_texts(
@@ -49,6 +62,24 @@ class PatchedMongoDBAtlasVectorSearch(MongoDBAtlasVectorSearch):
                 return ids_inserted
             else:
                 sleep(INTERVAL)
+        raise TimeoutError(f"Failed to embed, insert, and index texts in {TIMEOUT}s.")
+
+    async def abulk_embed_and_insert_texts(
+        self,
+        texts: Union[List[str], Iterable[str]],
+        metadatas: Union[List[dict], Generator[dict, Any, Any]],
+        ids: Optional[List[str]] = None,
+    ) -> List:
+        """Async patched insert_texts that waits for data to be indexed before returning"""
+        ids_inserted = await super().abulk_embed_and_insert_texts(texts, metadatas, ids)
+        n_docs = await self.collection.count_documents({})
+        start = monotonic()
+        while monotonic() - start <= TIMEOUT:
+            results = await self.asimilarity_search("sandwich", k=n_docs, oversampling_factor=1)
+            if len(results) == n_docs:
+                return ids_inserted
+            else:
+                await asyncio.sleep(INTERVAL)
         raise TimeoutError(f"Failed to embed, insert, and index texts in {TIMEOUT}s.")
 
 
@@ -237,7 +268,6 @@ class MockCollection(Collection):
         """
         pipeline: List[Dict[str, Any]] = args[0]
         params = pipeline[0]["$vectorSearch"]
-        embedding = params["queryVector"]
         # Assumes MongoDBAtlasSemanticCache.LLM == "llm_string"
         llm_string = params["filter"][MongoDBAtlasSemanticCache.LLM]["$eq"]
 
@@ -428,3 +458,123 @@ class AsyncMockCollection:
 
     def __repr__(self) -> str:
         return "AsyncMockCollection"
+
+class IntegrationTestCollection:
+    def __init__(
+        self,
+        db_name: str = "test_db",
+        collection_name: str = "test_collection", 
+        filters: List[str] = ["c"],
+        path: str = "embedding",
+        similarity: str = "cosine",
+        dimensions: int = 5,
+        timeout: int = 60
+    ) -> None:
+        self.DB_NAME = db_name
+        self.COLLECTION_NAME = collection_name
+        self.FILTERS = filters
+        self.PATH = path
+        self.SIMILARITY = similarity
+        self.DIMENSIONS = dimensions
+        self.TIMEOUT = timeout
+        self._vector_index_config = None
+        self._fulltext_index_config = None
+
+    def vector_search_index(
+        self,
+        index_name: str,
+        dimensions: Optional[int] = None,
+        path: Optional[str] = None,
+        filters: Optional[List[str]] = None,
+        similarity: Optional[str] = None,
+    ) -> "IntegrationTestCollection":
+        self._vector_index_config = {
+            "index_name": index_name,
+            "dimensions": dimensions or self.DIMENSIONS,
+            "path": path or self.PATH,
+            "filters": filters or self.FILTERS,
+            "similarity": similarity or self.SIMILARITY,
+        }
+        return self
+
+    def fulltext_search_index(
+        self,
+        index_name: str,
+        field: str = "test_field",
+    ) -> "IntegrationTestCollection":
+        self._fulltext_index_config = {
+            "index_name": index_name,
+            "field": field,
+        }
+        return self
+
+    async def async_collection(self, request, pymongo_async_client: AsyncMongoClient, motor_client: AsyncIOMotorClient) -> AsyncCollections:
+        client = pymongo_async_client if request.param == "pymongo" else motor_client
+        db = client[self.DB_NAME]
+        collection_names = await db.list_collection_names()
+        if self.COLLECTION_NAME not in collection_names:
+            clxn = await db.create_collection(self.COLLECTION_NAME)
+        else:
+            clxn = db[self.COLLECTION_NAME]
+
+        await clxn.delete_many({})
+
+        if request.param == "motor":
+            cursor = clxn.list_search_indexes()
+            indexes = await cursor.to_list(length=None)
+        else:
+            indexes = await (await clxn.list_search_indexes()).to_list(None)
+            
+        if self._vector_index_config and not any([self._vector_index_config["index_name"] == ix["name"] for ix in indexes]):
+            await acreate_vector_search_index(
+                collection=clxn,
+                index_name=self._vector_index_config["index_name"],
+                dimensions=self._vector_index_config["dimensions"],
+                path=self._vector_index_config["path"],
+                filters=self._vector_index_config["filters"],
+                similarity=self._vector_index_config["similarity"],
+                wait_until_complete=self.TIMEOUT,
+            )
+            
+        if self._fulltext_index_config and not any([self._fulltext_index_config["index_name"] == ix["name"] for ix in indexes]):
+            await acreate_fulltext_search_index(
+                collection=clxn,
+                index_name=self._fulltext_index_config["index_name"],
+                field=self._fulltext_index_config["field"],
+                wait_until_complete=self.TIMEOUT,
+            )
+
+        return clxn
+
+    def sync_collection(self, client: MongoClient) -> Collection:
+        db = client[self.DB_NAME]
+        collection_names = db.list_collection_names()
+        if self.COLLECTION_NAME not in collection_names:
+            clxn = db.create_collection(self.COLLECTION_NAME)
+        else:
+            clxn = db[self.COLLECTION_NAME]
+
+        clxn.delete_many({})
+
+        indexes = list(clxn.list_search_indexes())
+        
+        if self._vector_index_config and not any([self._vector_index_config["index_name"] == ix["name"] for ix in indexes]):
+            create_vector_search_index(
+                collection=clxn,
+                index_name=self._vector_index_config["index_name"],
+                dimensions=self._vector_index_config["dimensions"],
+                path=self._vector_index_config["path"],
+                filters=self._vector_index_config["filters"],
+                similarity=self._vector_index_config["similarity"],
+                wait_until_complete=self.TIMEOUT,
+            )
+            
+        if self._fulltext_index_config and not any([self._fulltext_index_config["index_name"] == ix["name"] for ix in indexes]):
+            create_fulltext_search_index(
+                collection=clxn,
+                index_name=self._fulltext_index_config["index_name"],
+                field=self._fulltext_index_config["field"],
+                wait_until_complete=self.TIMEOUT,
+            )
+
+        return clxn

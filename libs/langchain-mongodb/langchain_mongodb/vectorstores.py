@@ -22,12 +22,15 @@ from langchain_core.runnables.config import run_in_executor
 from langchain_core.vectorstores import VectorStore
 from pymongo import MongoClient
 from pymongo.collection import Collection
+from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.driver_info import DriverInfo
 from pymongo.errors import CollectionInvalid
-
+from langchain_mongodb.utils import AsyncCollectionWrapper
 from langchain_mongodb.index import (
     create_vector_search_index,
     update_vector_search_index,
+    aupdate_vector_search_index,
+    acreate_vector_search_index,
 )
 from langchain_mongodb.pipelines import vector_search_stage
 from langchain_mongodb.utils import (
@@ -205,7 +208,7 @@ class MongoDBAtlasVectorSearch(VectorStore):
 
     def __init__(
         self,
-        collection: Union[Collection, Any],
+        collection: Union[Collection, AsyncCollection],
         embedding: Embeddings,
         index_name: str = "vector_index",
         text_key: str = "text",
@@ -390,11 +393,13 @@ class MongoDBAtlasVectorSearch(VectorStore):
         for end in range(batch_size, n_texts + batch_size, batch_size):
             chunk_texts = text_list[start:end]
             chunk_metas = meta_list[start:end]
+            print('debug: aadd_texts 1')
             if ids:
                 chunk_ids = ids[start:end]
                 batch_res = await self.abulk_embed_and_insert_texts(chunk_texts, chunk_metas, chunk_ids)
             else:
                 batch_res = await self.abulk_embed_and_insert_texts(chunk_texts, chunk_metas)
+            print('debug: aadd_texts 2')
             result_ids.extend(batch_res)
             start = end
 
@@ -462,7 +467,8 @@ class MongoDBAtlasVectorSearch(VectorStore):
                 }
                 for t, m, emb in zip(texts, metadatas, embeddings)
             ]
-        insert_result = await self._collection.insert_many(to_insert)  # type: ignore
+            
+        insert_result = await self._collection.insert_many(to_insert)
         return [oid_to_str(_id) for _id in insert_result.inserted_ids]
     
     def add_documents(
@@ -749,7 +755,9 @@ class MongoDBAtlasVectorSearch(VectorStore):
         The actual async version that does the same job as from_texts().
         """
         vectorstore = cls(collection, embedding, **kwargs)
+        print('debug: afrom_texts 0')
         await vectorstore.aadd_texts(texts, metadatas=metadatas, ids=ids)
+        print('debug: afrom_texts 1')
         return vectorstore
     
     def delete(self, ids: Optional[List[str]] = None, **kwargs: Any) -> Optional[bool]:
@@ -986,11 +994,11 @@ class MongoDBAtlasVectorSearch(VectorStore):
         if post_filter_pipeline:
             pipeline.extend(post_filter_pipeline)
         
-        async_cursor = await self._collection.aggregate(pipeline)
+        collection_wrapper = AsyncCollectionWrapper(self._collection)
         docs: List[Tuple[Document, float]] = []
         
         # Format
-        async for res in async_cursor:
+        async for res in collection_wrapper.aggregate(pipeline):
             text = res.pop(self._text_key)
             score = res.pop("score")
             make_serializable(res)
@@ -1032,6 +1040,52 @@ class MongoDBAtlasVectorSearch(VectorStore):
         )
 
         index_operation(
+            collection=self._collection,
+            index_name=self._index_name,
+            dimensions=dimensions,
+            path=self._embedding_key,
+            similarity=self._relevance_score_fn,
+            filters=filters or [],
+            wait_until_complete=wait_until_complete,
+        )  # type: ignore [operator]
+        
+    async def acreate_vector_search_index(
+        self,
+        dimensions: int,
+        filters: Optional[List[str]] = None,
+        update: bool = False,
+        wait_until_complete: Optional[float] = None,
+    ) -> None:
+        """Async version of create_vector_search_index.
+        
+        Creates a MongoDB Atlas vectorSearch index for the VectorStore
+
+        Note**: This method may fail as it requires a MongoDB Atlas with these
+        `pre-requisites <https://www.mongodb.com/docs/atlas/atlas-vector-search/create-index/#prerequisites>`.
+        Currently, vector and full-text search index operations need to be
+        performed manually on the Atlas UI for shared M0 clusters.
+
+        Args:
+            dimensions (int): Number of dimensions in embedding
+            filters (Optional[List[Dict[str, str]]], optional): additional filters
+            for index definition.
+                Defaults to None.
+            update (Optional[bool]): Updates existing vectorSearch index.
+                Defaults to False.
+            wait_until_complete (Optional[float]): If given, a TimeoutError is raised
+                if search index is not ready after this number of seconds.
+                If not given, the default, operation will not wait.
+        """
+        try:
+            await self._collection.database.create_collection(self._collection.name)
+        except CollectionInvalid:
+            pass
+
+        index_operation = (
+            aupdate_vector_search_index if update else acreate_vector_search_index
+        )
+
+        await index_operation(
             collection=self._collection,
             index_name=self._index_name,
             dimensions=dimensions,

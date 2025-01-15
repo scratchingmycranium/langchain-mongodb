@@ -18,15 +18,18 @@ are duplicated in this utility respectively from modules:
 from __future__ import annotations
 
 import logging
+import asyncio
 from datetime import date, datetime
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, AsyncIterable, Optional
 
 import numpy as np
-
+from motor.motor_asyncio import AsyncIOMotorCollection
+from pymongo.asynchronous.collection import AsyncCollection
 logger = logging.getLogger(__name__)
 
 Matrix = Union[List[List[float]], List[np.ndarray], np.ndarray]
 
+AsyncCollections = Union[AsyncIOMotorCollection, AsyncCollection]
 
 def cosine_similarity(X: Matrix, Y: Matrix) -> np.ndarray:
     """Row-wise cosine similarity between two equal-width matrices."""
@@ -181,3 +184,59 @@ def make_serializable(
             obj[k] = oid_to_str(v)
         elif isinstance(v, (datetime, date)):
             obj[k] = v.isoformat()
+
+class AsyncCollectionWrapper:
+    """Wrapper to normalize behavior between Motor and PyMongo async clients."""
+    
+    def __init__(self, collection: Union[AsyncIOMotorCollection, AsyncCollection]):
+        self._collection = collection
+        self._is_motor = isinstance(collection, AsyncIOMotorCollection)
+
+    async def list_search_indexes(self, index_name: Optional[str] = None) -> List[Any]:
+        """Normalize list_search_indexes behavior."""
+        if self._is_motor:
+            cursor = self._collection.list_search_indexes(index_name)
+            indexes = []
+            async for index in cursor:
+                indexes.append(index)
+            return indexes
+        else:
+            cursor = await self._collection.list_search_indexes(index_name)
+            return await cursor.to_list(None)
+
+    async def delete_many(self, *args, **kwargs):
+        """Pass through delete_many."""
+        return await self._collection.delete_many(*args, **kwargs)
+
+    async def create_collection(self, *args, **kwargs):
+        """Pass through create_collection."""
+        return await self._collection.create_collection(*args, **kwargs)
+
+    async def insert_many(self, documents: List[Dict[str, Any]], *args, **kwargs):
+        """Normalize insert_many behavior."""
+        result = await self._collection.insert_many(documents, *args, **kwargs)
+        # Ensure we always return a consistent format for inserted_ids
+        if self._is_motor:
+            return type('InsertManyResult', (), {
+                'inserted_ids': list(result.inserted_ids),
+                'acknowledged': result.acknowledged
+            })
+        return result
+
+    async def aggregate(self, pipeline: List[Dict[str, Any]], *args, **kwargs) -> AsyncIterable:
+        """Normalize aggregate behavior."""
+        if self._is_motor:
+            # Motor's aggregate returns a cursor that needs to be iterated asynchronously
+            cursor = self._collection.aggregate(pipeline, *args, **kwargs)
+            async for document in cursor:
+                yield document
+        else:
+            # PyMongo async requires await on the cursor
+            cursor = await self._collection.aggregate(pipeline, *args, **kwargs)
+            async for document in cursor:
+                yield document
+                
+    @property
+    def collection(self) -> Union[AsyncIOMotorCollection, AsyncCollection]:
+        """Get the underlying collection."""
+        return self._collection
